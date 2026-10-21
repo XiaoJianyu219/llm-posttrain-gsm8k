@@ -32,8 +32,11 @@ def build_messages(question: str) -> list[dict]:
     return [{"role": "user", "content": TOOL_INSTRUCTION + question}]
 
 
-def run_python(code: str, timeout: float = 5.0) -> str:
-    """在隔离子进程里跑一段代码，返回截断后的 stdout/stderr。-I 隔离，不继承环境和当前目录的模块。"""
+def run_python(code: str, timeout: float = 5.0) -> tuple[str, bool]:
+    """在隔离子进程里跑一段代码，返回 (回灌给模型的文本, 是否出错)。
+    -I -S 隔离，不继承环境、site 和当前目录的模块。代码自身抛异常时把 traceback 回灌（真实解释器就是这样），
+    并把 is_error 置真，供统计工具失败率。"""
+    is_error = False
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "snippet.py"
         f.write_text(code, encoding="utf-8")
@@ -41,14 +44,15 @@ def run_python(code: str, timeout: float = 5.0) -> str:
             p = subprocess.run([sys.executable, "-I", "-S", str(f)], capture_output=True, text=True,
                                timeout=timeout, cwd=d)
             out = (p.stdout or "") + (("\n" + p.stderr) if p.returncode and p.stderr else "")
+            is_error = p.returncode != 0
         except subprocess.TimeoutExpired:
-            out = f"[tool error] execution timed out after {timeout:g}s"
+            out, is_error = f"[tool error] execution timed out after {timeout:g}s", True
         except Exception as exc:  # noqa: BLE001 - 工具错误要回灌给模型，不能让采样挂掉
-            out = f"[tool error] {type(exc).__name__}: {exc}"
+            out, is_error = f"[tool error] {type(exc).__name__}: {exc}", True
     out = out.strip()
     if len(out) > 600:
         out = out[:600] + " …[truncated]"
-    return out or "[no output]"
+    return (out or "[no output]"), is_error
 
 
 @dataclass
@@ -114,9 +118,9 @@ def rollout_with_tools(model, tokenizer, questions, *, device, gen_config, max_t
                 traj.finished = has_answer or hit_eos
                 break
             # 执行代码，把结果作为一条 user 消息拼回去（工具返回，mask=0）
-            result = run_python(code.group(1), timeout=tool_timeout)
+            result, is_error = run_python(code.group(1), timeout=tool_timeout)
             traj.tool_calls += 1
-            traj.tool_errors += int(result.startswith("[tool error]"))
+            traj.tool_errors += int(is_error)
             messages.append({"role": "assistant", "content": assistant_text})
             messages.append({"role": "user", "content": f"```output\n{result}\n```"})
             full = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)

@@ -267,9 +267,12 @@ def test_tool(tiny_dir: Path, tmp: Path) -> None:
     import torch
     from tool_rollout import Trajectory, collate_trajectories, rollout_with_tools, run_python, set_tool_generation
 
-    assert run_python("print(6*7)") == "42", "工具应执行代码并返回 stdout"
-    assert run_python("print(sum(range(5)))") == "10", "工具 sum"
-    assert run_python("1/0").startswith("[tool error]"), "报错应回灌为 tool error，不抛出"
+    assert run_python("print(6*7)") == ("42", False), "工具应执行代码并返回 stdout"
+    assert run_python("print(sum(range(5)))") == ("10", False), "工具 sum"
+    out, err = run_python("1/0")
+    assert err and "ZeroDivisionError" in out, "代码抛异常应回灌 traceback 并标记出错，不让采样挂掉"
+    out, err = run_python("while True: pass", timeout=1.0)
+    assert err and "timed out" in out, "死循环应超时并标记出错"
 
     # 手工轨迹：模型 2 token、工具 2 token、模型 1 token → response_mask 必须是 [1,1,0,0,1]
     t = Trajectory(prompt_ids=[10, 11], token_ids=[20, 21, 30, 31, 22], mask=[1, 1, 0, 0, 1])
