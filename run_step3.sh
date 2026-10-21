@@ -21,8 +21,10 @@ echo "[1/5] SFT（标准解答，2 个 epoch）"
 python train_sft.py --model "$MODEL" --data-dir "$DATA" --out-dir "$RUN/sft"
 python eval_gsm8k.py --model "$RUN/sft/final" --data "$DATA/test.jsonl" --out-dir "$RUN/eval_sft"
 
-echo "[2/5] 用底座采样，按严格判分造 DPO 偏好对（$BACKEND）"
-"$PAIRS_PY" make_dpo_pairs.py --model "$MODEL" --data-dir "$DATA" --out "$RUN/dpo_pairs.jsonl" --backend "$BACKEND"
+# 底座几乎不写 ####，严格判分配不出偏好对，所以按数值对错（flexible）配对；评测仍同时报严格 / 宽松
+echo "[2/5] 用底座采样，按数值对错造 DPO 偏好对（$BACKEND）"
+"$PAIRS_PY" make_dpo_pairs.py --model "$MODEL" --data-dir "$DATA" --out "$RUN/dpo_pairs.jsonl" \
+  --backend "$BACKEND" --scorer flexible
 
 echo "[3/5] DPO"
 python train_dpo.py --model "$MODEL" --pairs "$RUN/dpo_pairs.jsonl" --data-dir "$DATA" --out-dir "$RUN/dpo"

@@ -63,6 +63,9 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--data-dir", required=True)
     ap.add_argument("--out", required=True, help="偏好对 jsonl；同目录另写一份 <名字>_stats.json")
+    ap.add_argument("--scorer", choices=["strict", "flexible"], default="flexible",
+                    help="按哪种判分分对错来配对。底座几乎不写 ####，strict 下几乎配不出对，"
+                         "所以默认 flexible（按最终数值对错）；评测仍同时报 strict / flexible")
     ap.add_argument("--samples-per-prompt", type=int, default=16)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--max-new-tokens", type=int, default=512)
@@ -86,14 +89,15 @@ def main() -> None:
     responses = (sample_vllm if args.backend == "vllm" else sample_hf)(args, tokenizer, prompts)
     elapsed = time.perf_counter() - start
     texts = tokenizer.batch_decode(responses, skip_special_tokens=True)
-    strict = [score_strict(t, golds[k // n]) for k, t in enumerate(texts)]
+    strict = [score_strict(t, golds[k // n]) == 1.0 for k, t in enumerate(texts)]
     flexible = [score_flexible(t, golds[k // n]) for k, t in enumerate(texts)]
+    correct = strict if args.scorer == "strict" else flexible  # 配对用哪种判分
 
     rng = random.Random(args.seed)
     pairs = []
     for i, row in enumerate(rows):
-        good = [k for k in range(i * n, (i + 1) * n) if strict[k] == 1.0]
-        bad = [k for k in range(i * n, (i + 1) * n) if strict[k] == 0.0]
+        good = [k for k in range(i * n, (i + 1) * n) if correct[k]]
+        bad = [k for k in range(i * n, (i + 1) * n) if not correct[k]]
         if good and bad:
             w, l = rng.choice(good), rng.choice(bad)
             pairs.append({"index": row["extra_info"]["index"], "gold": golds[i], "prompt_ids": prompts[i],
@@ -102,9 +106,9 @@ def main() -> None:
     out = Path(args.out)
     write_jsonl(out, pairs)
     stats = {
-        "backend": args.backend, "prompts": len(rows), "samples_per_prompt": n, "elapsed_s": elapsed,
-        "strict_correct_rate": sum(strict) / len(strict), "flexible_correct_rate": sum(flexible) / len(flexible),
-        "pairs": len(pairs),
+        "backend": args.backend, "scorer": args.scorer, "prompts": len(rows), "samples_per_prompt": n,
+        "elapsed_s": elapsed, "strict_correct_rate": sum(strict) / len(strict),
+        "flexible_correct_rate": sum(flexible) / len(flexible), "pairs": len(pairs),
         "chosen_tokens_mean": sum(len(p["chosen_ids"]) for p in pairs) / max(1, len(pairs)),
         "rejected_tokens_mean": sum(len(p["rejected_ids"]) for p in pairs) / max(1, len(pairs)),
     }
