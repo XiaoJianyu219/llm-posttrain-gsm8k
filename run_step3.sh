@@ -12,6 +12,8 @@ STEP1=${1:?用法：bash run_step3.sh <第 ① 步的运行目录>}
 RUN=${RUN:-$ROOT/runs/step3_$(date +%m%d_%H%M)}
 BACKEND=${BACKEND:-hf}
 PAIRS_PY=${PAIRS_PY:-python}
+PAIR_PROMPTS=${PAIR_PROMPTS:-3000}   # 造偏好对用多少道题（底座数值正确率约 0.46，足够配出几千对）
+PAIR_SAMPLES=${PAIR_SAMPLES:-8}
 export HF_HOME=${HF_HOME:-$ROOT/hf_cache}
 mkdir -p "$RUN"
 exec > >(tee -a "$RUN/run.log") 2>&1
@@ -24,7 +26,7 @@ python eval_gsm8k.py --model "$RUN/sft/final" --data "$DATA/test.jsonl" --out-di
 # 底座几乎不写 ####，严格判分配不出偏好对，所以按数值对错（flexible）配对；评测仍同时报严格 / 宽松
 echo "[2/5] 用底座采样，按数值对错造 DPO 偏好对（$BACKEND）"
 "$PAIRS_PY" make_dpo_pairs.py --model "$MODEL" --data-dir "$DATA" --out "$RUN/dpo_pairs.jsonl" \
-  --backend "$BACKEND" --scorer flexible
+  --backend "$BACKEND" --scorer flexible --limit "$PAIR_PROMPTS" --samples-per-prompt "$PAIR_SAMPLES"
 
 echo "[3/5] DPO"
 python train_dpo.py --model "$MODEL" --pairs "$RUN/dpo_pairs.jsonl" --data-dir "$DATA" --out-dir "$RUN/dpo"
