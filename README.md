@@ -15,9 +15,12 @@
 
 **租卡**：RTX 4090 × 1；基础镜像选 PyTorch ≥ 2.5、CUDA ≥ 12.4、Python 3.10–3.12；数据盘扩到 100 GB。
 
-**1. 无卡模式开机**（便宜，用来装环境和下载）
+租到后**直接带卡开机，准备和训练一口气跑完，中间不要关机**：关机会释放 GPU，再开机时这台主机可能已经没有空闲卡。准备阶段十几分钟，带卡多花的钱很少。`setup_server.sh` 也能在无卡模式下跑，但按这个理由不推荐。
+
+**1. 准备**
 
 ```bash
+tmux new -s p1                                # 网页终端断开也不会中断
 mkdir -p /root/autodl-tmp/p1 && cd /root/autodl-tmp/p1
 source /etc/network_turbo                     # 学术资源加速，git clone GitHub 用
 git clone https://github.com/XiaoJianyu219/llm-posttrain-gsm8k.git
@@ -29,11 +32,10 @@ cd llm-posttrain-gsm8k && bash setup_server.sh
 
 仓库是私有的话，`git clone` 会要求登录：用户名填 GitHub 用户名，密码填一个对这个仓库有只读权限的 fine-grained token；或者在 GitHub 网页上 Download ZIP，再从 JupyterLab 上传。
 
-**2. 关机，换成带卡开机**
+**2. 训练**（在同一个 tmux 窗口里接着跑）
 
 ```bash
-tmux new -s p1
-cd /root/autodl-tmp/p1/llm-posttrain-gsm8k && bash run_step1.sh
+bash run_step1.sh
 # Ctrl-b 再按 d 挂到后台；回来看进度：tmux attach -t p1
 ```
 

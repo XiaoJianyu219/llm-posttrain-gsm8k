@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# P1 第 ① 步 · 服务器准备：无卡模式开机就能跑，不花 GPU 的钱。
-# 装依赖 → 下载并切分 GSM8K → 下载模型 → 冒烟测试。全部通过后关机，换成带卡开机，再跑 run_step1.sh。
+# P1 第 ① 步 · 服务器准备：不需要 GPU，带卡、无卡模式都能跑（推荐带卡开机后直接跑，中间不关机，见 README）。
+# 装依赖 → 下载并切分 GSM8K → 下载模型 → 冒烟测试。全部通过后接着跑 run_step1.sh。
 #   cd /root/autodl-tmp/p1/llm-posttrain-gsm8k && bash setup_server.sh
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -43,4 +43,4 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
 echo "[4/4] 冒烟测试（CPU，几分钟）"
 python smoke_test.py --model-dir "$MODEL_DIR" --raw-gsm8k "$DATA/raw"
-echo "准备完成。关机，换成带卡开机后在 tmux 里跑：bash run_step1.sh"
+echo "准备完成。接着跑：bash run_step1.sh"
