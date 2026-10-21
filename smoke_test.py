@@ -109,6 +109,8 @@ def make_tiny_model(model_dir: Path, out: Path):
     cfg = AutoConfig.from_pretrained(model_dir)
     cfg.hidden_size, cfg.intermediate_size = 64, 128
     cfg.num_hidden_layers, cfg.max_window_layers = 2, 2
+    if getattr(cfg, "layer_types", None):  # 新版 transformers 按层记录注意力类型，重新加载时会和层数对照
+        cfg.layer_types = cfg.layer_types[:cfg.num_hidden_layers]
     cfg.num_attention_heads, cfg.num_key_value_heads = 4, 2
     if hasattr(cfg, "head_dim"):
         cfg.head_dim = 16
