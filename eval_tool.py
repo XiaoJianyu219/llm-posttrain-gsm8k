@@ -29,6 +29,7 @@ def main() -> None:
     ap.add_argument("--data", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--max-turns", type=int, default=3)
+    ap.add_argument("--gen-batch-size", type=int, default=128, help="每轮一次给模型喂多少条活跃轨迹")
     ap.add_argument("--max-new-tokens", type=int, default=400, help="每一轮的生成上限")
     ap.add_argument("--tool-timeout", type=float, default=5.0)
     ap.add_argument("--limit", type=int, default=0)
@@ -48,7 +49,8 @@ def main() -> None:
     questions = [r["extra_info"]["question"] for r in rows]
     start = time.perf_counter()
     trajs = rollout_with_tools(model, tokenizer, questions, device=device, gen_config=gen,
-                               max_turns=args.max_turns, tool_timeout=args.tool_timeout)
+                               max_turns=args.max_turns, gen_batch_size=args.gen_batch_size,
+                               tool_timeout=args.tool_timeout)
     elapsed = time.perf_counter() - start
 
     samples = []

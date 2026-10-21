@@ -39,6 +39,7 @@ def parse_args():
     ap.add_argument("--mini-batch-size", type=int, default=8)
     ap.add_argument("--micro-batch-size", type=int, default=2)
     ap.add_argument("--max-turns", type=int, default=3)
+    ap.add_argument("--gen-batch-size", type=int, default=128, help="每轮一次喂多少条活跃轨迹")
     ap.add_argument("--max-new-tokens", type=int, default=400, help="每一轮的生成上限")
     ap.add_argument("--max-prompt-len", type=int, default=400)
     ap.add_argument("--tool-timeout", type=float, default=5.0)
@@ -111,7 +112,8 @@ def main() -> None:
                 gen_cfg = set_tool_generation(actor, tokenizer, greedy=False, max_new_tokens=args.max_new_tokens,
                                               temperature=args.temperature)
                 trajs = rollout_with_tools(actor, tokenizer, questions, device=device, gen_config=gen_cfg,
-                                           max_turns=args.max_turns, tool_timeout=args.tool_timeout)
+                                           max_turns=args.max_turns, gen_batch_size=args.gen_batch_size,
+                                           tool_timeout=args.tool_timeout)
             if device.type == "cuda":
                 torch.cuda.empty_cache()
             with timed("reward", timing, device):

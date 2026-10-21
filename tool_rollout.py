@@ -83,55 +83,83 @@ def set_tool_generation(model, tokenizer, *, greedy: bool, max_new_tokens: int, 
 
 
 @torch.no_grad()
-def rollout_with_tools(model, tokenizer, questions, *, device, gen_config, max_turns=3, max_tool_output=600,
-                       tool_timeout=5.0):
-    """对一批题逐条跑多轮工具轨迹。实现清楚优先，按题串行（0.5B 上够快）。返回 [Trajectory]。"""
-    im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    trajectories = []
-    for question in questions:
-        messages = build_messages(question)
-        base_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
-        traj = Trajectory(prompt_ids=list(base_ids))
-        prev_ids = list(base_ids)
-        for turn in range(max_turns):
-            input_ids = torch.tensor([prev_ids], device=device)
-            attn = torch.ones_like(input_ids)
-            out = model.generate(input_ids=input_ids, attention_mask=attn, generation_config=gen_config)
-            new_ids = out[0, len(prev_ids):].tolist()
-            if new_ids and new_ids[-1] in (im_end, tokenizer.convert_tokens_to_ids("<|endoftext|>")):
-                gen_ids = new_ids[:-1]          # 去掉结尾的 <|im_end|>，由下面统一补
-                hit_eos = True
-            else:
-                gen_ids, hit_eos = new_ids, False
-            traj.token_ids.extend(gen_ids)
-            traj.mask.extend([1] * len(gen_ids))
-            assistant_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-            traj.text += assistant_text
-            traj.turns += 1
+def _batch_generate(model, tokenizer, seqs: list, gen_config, device):
+    """对一批当前序列（各自长度不同）左填充后一次生成。返回每条的新增 token（去掉结尾 EOS）和是否命中 EOS。"""
+    pad = tokenizer.pad_token_id
+    width = max(len(s) for s in seqs)
+    input_ids = torch.full((len(seqs), width), pad, dtype=torch.long, device=device)
+    attn = torch.zeros((len(seqs), width), dtype=torch.long, device=device)
+    for i, s in enumerate(seqs):
+        input_ids[i, width - len(s):] = torch.tensor(s, device=device)
+        attn[i, width - len(s):] = 1
+    out = model.generate(input_ids=input_ids, attention_mask=attn, generation_config=gen_config)
+    eos = set(gen_config.eos_token_id)
+    results = []
+    for i in range(len(seqs)):
+        new = out[i, width:].tolist()
+        cut = next((k for k, t in enumerate(new) if t in eos), None)
+        if cut is None:
+            results.append((new, False))                 # 被 max_new_tokens 截断
+        else:
+            results.append((new[:cut], True))            # 去掉结尾 EOS，命中
+    return results
 
-            code = CODE_RE.search(assistant_text)
-            has_answer = "####" in assistant_text
-            # 结束条件：给了答案、或这一轮没有可执行的代码块、或已是最后一轮（没代码就没什么可继续的）
-            if has_answer or code is None or turn == max_turns - 1:
-                traj.token_ids.append(im_end)
-                traj.mask.append(1)            # 结尾的 <|im_end|> 算模型生成
-                traj.finished = has_answer or hit_eos
-                break
-            # 执行代码，把结果作为一条 user 消息拼回去（工具返回，mask=0）
+
+@torch.no_grad()
+def rollout_with_tools(model, tokenizer, questions, *, device, gen_config, max_turns=3, gen_batch_size=128,
+                       tool_timeout=5.0):
+    """多轮工具轨迹，按轮次批量生成（把所有还活跃的轨迹拼成一批一起 generate，比逐条快很多）。返回 [Trajectory]。"""
+    im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    trajs, messages_of, prev_of = [], [], []
+    for q in questions:
+        msgs = build_messages(q)
+        ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True)
+        trajs.append(Trajectory(prompt_ids=list(ids)))
+        messages_of.append(msgs)
+        prev_of.append(list(ids))
+    active = list(range(len(questions)))
+
+    for turn in range(max_turns):
+        last_turn = turn == max_turns - 1
+        gen = {}
+        for s in range(0, len(active), gen_batch_size):
+            chunk = active[s:s + gen_batch_size]
+            for idx, (new, hit_eos) in zip(chunk, _batch_generate(
+                    model, tokenizer, [prev_of[i] for i in chunk], gen_config, device)):
+                gen[idx] = (new, hit_eos)
+        still = []
+        for idx in active:
+            gen_ids, hit_eos = gen[idx]
+            t = trajs[idx]
+            t.token_ids.extend(gen_ids)
+            t.mask.extend([1] * len(gen_ids))
+            text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+            t.text += text
+            t.turns += 1
+            code = CODE_RE.search(text)
+            has_answer = "####" in text
+            if has_answer or code is None or last_turn:
+                t.token_ids.append(im_end)
+                t.mask.append(1)                 # 结尾 <|im_end|> 算模型生成
+                t.finished = has_answer or hit_eos
+                continue
             result, is_error = run_python(code.group(1), timeout=tool_timeout)
-            traj.tool_calls += 1
-            traj.tool_errors += int(is_error)
-            messages.append({"role": "assistant", "content": assistant_text})
-            messages.append({"role": "user", "content": f"```output\n{result}\n```"})
-            full = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
-            # full 相对上一次渲染新增的部分 = <|im_end|>（结束 assistant）+ 整个 user 工具轮 + 新的 assistant 提示头
-            tool_ids = full[len(prev_ids) + len(gen_ids):]
-            traj.token_ids.extend(tool_ids)
-            traj.mask.extend([0] * len(tool_ids))   # 工具返回和模板 token 都不算 loss
-            traj.text += f"\n```output\n{result}\n```\n"
-            prev_ids = full
-        trajectories.append(traj)
-    return trajectories
+            t.tool_calls += 1
+            t.tool_errors += int(is_error)
+            messages_of[idx].append({"role": "assistant", "content": text})
+            messages_of[idx].append({"role": "user", "content": f"```output\n{result}\n```"})
+            full = tokenizer.apply_chat_template(messages_of[idx], add_generation_prompt=True, tokenize=True)
+            # full 相对上一次新增 = <|im_end|> + 整个工具 user 轮 + 新 assistant 提示头，都是工具/模板，mask=0
+            tool_ids = full[len(prev_of[idx]) + len(gen_ids):]
+            t.token_ids.extend(tool_ids)
+            t.mask.extend([0] * len(tool_ids))
+            t.text += f"\n```output\n{result}\n```\n"
+            prev_of[idx] = full
+            still.append(idx)
+        active = still
+        if not active:
+            break
+    return trajs
 
 
 def collate_trajectories(trajectories, pad_id: int) -> dict:
