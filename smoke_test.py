@@ -9,6 +9,7 @@
    - 采样时没有 top-k / top-p / 重复惩罚：generate 返回的原始 logits 和处理后的 scores 完全一致
    - collate + forward_logprobs 算出的 logprob 和 generate 当时的 logits 一致（验证左填充、位置编码、切片）
 3. 端到端：prepare_data → train_grpo 跑 2 步（组内交替奖励，保证有梯度）→ eval_gsm8k → compare_evals
+4. 第 ③ 步：train_sft 跑 2 步；train_dpo 用人工构造的偏好对跑 4 步（第 1 步 margin 必须为 0）；make_dpo_pairs 能跑通
 全部通过打印 ALL PASSED；任何一项不通过都会抛出 AssertionError，并写明是哪一项。
 """
 
@@ -28,7 +29,8 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from grpo_core import agg_loss, grpo_advantages, kl_k3, policy_loss, token_entropy, token_logprobs
-from gsm8k import INSTRUCTION, build_row, encode_prompt, extract_gold, score_flexible, score_strict
+from gsm8k import (INSTRUCTION, build_row, encode_prompt, extract_gold, read_jsonl, score_flexible, score_strict,
+                   write_jsonl)
 from rollout import collate, forward_logprobs, left_pad, set_generation
 
 HERE = Path(__file__).resolve().parent
@@ -101,7 +103,7 @@ def test_pure_functions() -> None:
     assert close(token_logprobs(logits, targets), expected), "token_logprobs"
     p = torch.softmax(logits, -1)
     assert close(token_entropy(logits), -(p * p.log()).sum(-1)), "token_entropy"
-    print("[1/3] 纯函数：通过")
+    print("[1/4] 纯函数：通过")
 
 
 def make_tiny_model(model_dir: Path, out: Path):
@@ -169,7 +171,7 @@ def test_tokenizer_and_generation(model_dir: Path, tiny_dir: Path) -> None:
 
     set_generation(model, tok, greedy=True, max_new_tokens=8)
     assert not model.generation_config.do_sample and model.generation_config.repetition_penalty == 1.0, "贪心配置"
-    print("[2/3] tokenizer、采样配置、logprob 一致性：通过")
+    print("[2/4] tokenizer、采样配置、logprob 一致性：通过")
 
 
 def run(args: list, label: str) -> None:
@@ -219,7 +221,45 @@ def test_end_to_end(raw_gsm8k: Path, tiny_dir: Path, tmp: Path) -> None:
         assert summary["n"] == 6 and "acc_flexible" in summary, f"{name} summary"
     run(["compare_evals.py", tmp / "eval_base" / "samples.jsonl", tmp / "eval_final" / "samples.jsonl"],
         "compare_evals")
-    print("[3/3] 端到端（准备数据 → 训练 2 步 → 评测 → 对比）：通过")
+    run(["summarize_evals.py", f"base={tmp / 'eval_base'}", f"grpo={tmp / 'eval_final'}"], "summarize_evals")
+    print("[3/4] 端到端（准备数据 → 训练 2 步 → 评测 → 对比）：通过")
+
+
+def test_step3(tiny_dir: Path, tmp: Path) -> None:
+    """第 ③ 步：SFT 跑 2 步；DPO 用人工构造的偏好对跑 4 步；造偏好对的采样脚本能跑通。"""
+    data = tmp / "data"
+    run(["train_sft.py", "--model", tiny_dir, "--data-dir", data, "--out-dir", tmp / "sft", "--epochs", "1",
+         "--limit", "8", "--batch-size", "4", "--micro-batch-size", "2", "--max-response-len", "400",
+         "--val-batch-size", "10", "--lr", "1e-3", "--device", "cpu"], "train_sft")
+    lines = [json.loads(x) for x in (tmp / "sft" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    losses = [x["train/loss"] for x in lines if "train/loss" in x]
+    assert len(losses) == 2 and all(math.isfinite(v) and v > 0 for v in losses), f"SFT loss：{losses}"
+    assert (tmp / "sft" / "final").exists(), "SFT 没存下模型"
+
+    tok = AutoTokenizer.from_pretrained(tiny_dir)
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+    pairs = []
+    for row in read_jsonl(data / "train.jsonl")[:4]:
+        gold = row["reward_model"]["ground_truth"]
+        pairs.append({"index": row["extra_info"]["index"], "gold": gold, "prompt_ids": encode_prompt(tok, row),
+                      "chosen_ids": tok(f"#### {gold}", add_special_tokens=False)["input_ids"] + [im_end],
+                      "rejected_ids": tok("no idea", add_special_tokens=False)["input_ids"] + [im_end],
+                      "chosen": f"#### {gold}", "rejected": "no idea"})
+    write_jsonl(tmp / "pairs.jsonl", pairs)
+    run(["train_dpo.py", "--model", tiny_dir, "--pairs", tmp / "pairs.jsonl", "--data-dir", data, "--out-dir",
+         tmp / "dpo", "--epochs", "2", "--batch-size", "2", "--micro-batch-size", "1", "--lr", "1e-3",
+         "--max-response-len", "16", "--val-batch-size", "10", "--device", "cpu"], "train_dpo")
+    steps = [json.loads(x) for x in (tmp / "dpo" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    steps = [x for x in steps if "train/margin" in x]
+    assert len(steps) == 4, f"DPO 应有 4 步，实际 {len(steps)}"
+    assert abs(steps[0]["train/margin"]) < 1e-4, f"第 1 步更新前策略等于参考模型，margin 应为 0：{steps[0]}"
+    assert steps[-1]["train/margin"] > steps[0]["train/margin"], "DPO 几步后 margin 应该变大"
+    assert (tmp / "dpo" / "final").exists(), "DPO 没存下模型"
+
+    run(["make_dpo_pairs.py", "--model", tiny_dir, "--data-dir", data, "--out", tmp / "pairs_gen.jsonl",
+         "--limit", "2", "--samples-per-prompt", "2", "--max-new-tokens", "8", "--device", "cpu"], "make_dpo_pairs")
+    assert (tmp / "pairs_gen_stats.json").exists(), "造偏好对没写出统计"
+    print("[4/4] 第 ③ 步（SFT 2 步、DPO 4 步、造偏好对）：通过")
 
 
 def main() -> None:
@@ -236,6 +276,7 @@ def main() -> None:
         tiny_dir = make_tiny_model(args.model_dir, tmp / "tiny")
         test_tokenizer_and_generation(args.model_dir, tiny_dir)
         test_end_to_end(args.raw_gsm8k, tiny_dir, tmp)
+        test_step3(tiny_dir, tmp)
     finally:
         if args.keep:
             print(f"临时目录：{tmp}")
