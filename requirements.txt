@@ -1,0 +1,5 @@
+# torch 用 AutoDL 镜像自带的（PyTorch >= 2.5、CUDA >= 12.4），这里不装，免得被替换
+transformers>=4.51,<5
+datasets
+pandas
+pyarrow
