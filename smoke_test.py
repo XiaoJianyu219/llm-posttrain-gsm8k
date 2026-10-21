@@ -1,4 +1,4 @@
-"""上卡前的冒烟测试：CPU 就能跑，几分钟结束。setup_server.sh 最后一步会自动跑它。
+"""开训前的冒烟测试：只用 CPU，几分钟结束。setup_server.sh 最后一步会自动跑它。
 
   python smoke_test.py --model-dir <含 tokenizer 和 config.json 的模型目录> --raw-gsm8k <含 train.jsonl、test.jsonl 的目录>
 

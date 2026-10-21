@@ -58,7 +58,7 @@ bash run_step1.sh
 | `train_grpo.py` | GRPO 主循环，分段计时，写 `metrics.jsonl` |
 | `eval_gsm8k.py` | 贪心评测：严格 / 宽松准确率、逐题结果；第 ②、③ 步的模型也用它测 |
 | `compare_evals.py` | 两次评测的配对比较：McNemar 精确检验、“格式错 / 算错”拆分 |
-| `smoke_test.py` | 上卡前在 CPU 上跑的测试（纯函数、采样配置、logprob 一致性、端到端 2 步） |
+| `smoke_test.py` | 开训前在 CPU 上跑的测试（纯函数、采样配置、logprob 一致性、端到端 2 步） |
 | `setup_server.sh` / `run_step1.sh` | 服务器上的准备和正式运行 |
 
 ---
@@ -116,5 +116,5 @@ verl 的默认值按 2026-10-21 的 main 分支核对；实际装的版本不同
 ## 验证情况
 
 - 本地只做了语法检查（`py_compile`、`bash -n`）。按计划不在本地装 torch、不在本地跑。
-- `smoke_test.py` 设计成在服务器无卡模式下先跑一遍，通过后再用 GPU。**它还没运行过**，第一次跑如果报错，按报错改。
+- `smoke_test.py` 由 `setup_server.sh` 在开训前自动跑一遍（只用 CPU），通过后再开始训练。**它还没运行过**，第一次跑如果报错，按报错改。
 - GPU 上的完整训练还没跑过，上面的耗时都是推算。
