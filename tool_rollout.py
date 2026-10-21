@@ -111,8 +111,8 @@ def rollout_with_tools(model, tokenizer, questions, *, device, gen_config, max_t
 
             code = CODE_RE.search(assistant_text)
             has_answer = "####" in assistant_text
-            # 结束条件：给了答案、或自然 EOS 且没有要执行的代码、或已是最后一轮
-            if has_answer or (hit_eos and not code) or turn == max_turns - 1:
+            # 结束条件：给了答案、或这一轮没有可执行的代码块、或已是最后一轮（没代码就没什么可继续的）
+            if has_answer or code is None or turn == max_turns - 1:
                 traj.token_ids.append(im_end)
                 traj.mask.append(1)            # 结尾的 <|im_end|> 算模型生成
                 traj.finished = has_answer or hit_eos
