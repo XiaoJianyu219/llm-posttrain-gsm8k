@@ -103,7 +103,7 @@ def test_pure_functions() -> None:
     assert close(token_logprobs(logits, targets), expected), "token_logprobs"
     p = torch.softmax(logits, -1)
     assert close(token_entropy(logits), -(p * p.log()).sum(-1)), "token_entropy"
-    print("[1/4] 纯函数：通过")
+    print("[1/5] 纯函数：通过")
 
 
 def make_tiny_model(model_dir: Path, out: Path):
@@ -171,7 +171,7 @@ def test_tokenizer_and_generation(model_dir: Path, tiny_dir: Path) -> None:
 
     set_generation(model, tok, greedy=True, max_new_tokens=8)
     assert not model.generation_config.do_sample and model.generation_config.repetition_penalty == 1.0, "贪心配置"
-    print("[2/4] tokenizer、采样配置、logprob 一致性：通过")
+    print("[2/5] tokenizer、采样配置、logprob 一致性：通过")
 
 
 def run(args: list, label: str) -> None:
@@ -222,7 +222,7 @@ def test_end_to_end(raw_gsm8k: Path, tiny_dir: Path, tmp: Path) -> None:
     run(["compare_evals.py", tmp / "eval_base" / "samples.jsonl", tmp / "eval_final" / "samples.jsonl"],
         "compare_evals")
     run(["summarize_evals.py", f"base={tmp / 'eval_base'}", f"grpo={tmp / 'eval_final'}"], "summarize_evals")
-    print("[3/4] 端到端（准备数据 → 训练 2 步 → 评测 → 对比）：通过")
+    print("[3/5] 端到端（准备数据 → 训练 2 步 → 评测 → 对比）：通过")
 
 
 def test_step3(tiny_dir: Path, tmp: Path) -> None:
@@ -259,7 +259,42 @@ def test_step3(tiny_dir: Path, tmp: Path) -> None:
     run(["make_dpo_pairs.py", "--model", tiny_dir, "--data-dir", data, "--out", tmp / "pairs_gen.jsonl",
          "--limit", "2", "--samples-per-prompt", "2", "--max-new-tokens", "8", "--device", "cpu"], "make_dpo_pairs")
     assert (tmp / "pairs_gen_stats.json").exists(), "造偏好对没写出统计"
-    print("[4/4] 第 ③ 步（SFT 2 步、DPO 4 步、造偏好对）：通过")
+    print("[4/5] 第 ③ 步（SFT 2 步、DPO 4 步、造偏好对）：通过")
+
+
+def test_tool(tiny_dir: Path, tmp: Path) -> None:
+    """第 ④ 步：工具执行、轨迹 mask 对齐、多轮采样跑通、带工具 GRPO 跑 2 步。"""
+    import torch
+    from tool_rollout import Trajectory, collate_trajectories, rollout_with_tools, run_python, set_tool_generation
+
+    assert run_python("print(6*7)") == "42", "工具应执行代码并返回 stdout"
+    assert run_python("print(sum(range(5)))") == "10", "工具 sum"
+    assert run_python("1/0").startswith("[tool error]"), "报错应回灌为 tool error，不抛出"
+
+    # 手工轨迹：模型 2 token、工具 2 token、模型 1 token → response_mask 必须是 [1,1,0,0,1]
+    t = Trajectory(prompt_ids=[10, 11], token_ids=[20, 21, 30, 31, 22], mask=[1, 1, 0, 0, 1])
+    batch = collate_trajectories([t], pad_id=0)
+    assert batch["response_mask"][0].tolist() == [1, 1, 0, 0, 1], "工具 token 的 mask 必须是 0"
+    assert batch["response_mask"].sum().item() == 3, "只有 3 个模型生成 token 计入"
+    assert batch["prompt_len"] == 2 and batch["responses"].shape[1] == 5, "collate 形状"
+
+    tok = AutoTokenizer.from_pretrained(tiny_dir)
+    model = AutoModelForCausalLM.from_pretrained(tiny_dir).float().eval()
+    gen = set_tool_generation(model, tok, greedy=True, max_new_tokens=8)
+    trajs = rollout_with_tools(model, tok, ["What is 2+3?"], device=torch.device("cpu"), gen_config=gen,
+                               max_turns=2, tool_timeout=3.0)
+    tr = trajs[0]
+    assert tr.prompt_len > 0 and len(tr.token_ids) == len(tr.mask), "轨迹 mask 必须和 token 等长"
+    assert all(m in (0, 1) for m in tr.mask) and set(tr.mask) <= {0, 1}, "mask 只能是 0/1"
+
+    run(["train_grpo_tool.py", "--model", tiny_dir, "--data-dir", tmp / "data", "--out-dir", tmp / "tool",
+         "--steps", "2", "--train-batch-size", "2", "--group-size", "4", "--mini-batch-size", "1",
+         "--micro-batch-size", "2", "--max-turns", "2", "--max-new-tokens", "8", "--device", "cpu"],
+        "train_grpo_tool")
+    lines = [json.loads(x) for x in (tmp / "tool" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 2 and "tool/call_rate" in lines[0] and "timing_s/gen" in lines[0], "工具 GRPO 指标缺失"
+    assert (tmp / "tool" / "final").exists(), "工具 GRPO 没存下模型"
+    print("[5/5] 第 ④ 步（工具执行、轨迹 mask、多轮采样、带工具 GRPO 2 步）：通过")
 
 
 def main() -> None:
@@ -277,6 +312,7 @@ def main() -> None:
         test_tokenizer_and_generation(args.model_dir, tiny_dir)
         test_end_to_end(args.raw_gsm8k, tiny_dir, tmp)
         test_step3(tiny_dir, tmp)
+        test_tool(tiny_dir, tmp)
     finally:
         if args.keep:
             print(f"临时目录：{tmp}")
