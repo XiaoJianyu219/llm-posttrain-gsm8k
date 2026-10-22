@@ -1,25 +1,25 @@
 # llm-posttrain-gsm8k
 
-小模型后训练实验：单张 RTX 4090，Qwen2.5-0.5B-Instruct + GSM8K，按顺序做四步。每一步都在**同一个留出测试集**上用**同一个评测脚本**量效果，结果可以直接放进一张表比较。
+小模型后训练实验：单张 RTX 4090，Qwen2.5-0.5B-Instruct + GSM8K，按顺序做四步。每一步都在同一个留出测试集上、用同一个评测脚本量效果，结果可以放进一张表直接比较。
 
 | 步骤 | 内容 | 结果（测试集 1319 题，严格口径） |
 |---|---|---|
-| ① | 自写 GRPO，训练前后在测试集上评测 | 0.08% → **56.2%** |
+| ① | 自写 GRPO，训练前后在测试集上评测 | 0.08% → 56.2% |
 | ② | 与 verl 对齐 + 每步耗时拆分 | 与 verl 公布的同模型基线（PPO 56.7、GRPO-LoRA 54.3）一致；rollout 占每步 63.6%。用 verl 完整复跑因 vLLM / transformers 版本冲突没有完成，脚本留在仓库 |
 | ③ | 同一底座做 SFT、DPO，和 GRPO 对比 | SFT 37.5%；DPO 没学会格式（严格 0.08%，宽松提升不显著） |
-| ④ | 给模型 Python 解释器工具，做多轮 GRPO | 1.4% → **46.6%**（不及纯推理 GRPO） |
+| ④ | 给模型 Python 解释器工具，做多轮 GRPO | 1.4% → 46.6%（低于纯推理 GRPO） |
 
 完整结果、分析和局限见 [`RESULTS.md`](RESULTS.md)。
 
 ---
 
-## 第 ① 步怎么跑（AutoDL）
+## 怎么跑（AutoDL）
 
-**租卡**：RTX 4090 × 1；基础镜像选 PyTorch ≥ 2.5、CUDA ≥ 12.4、Python 3.10–3.12；数据盘扩到 100 GB。
+租卡：RTX 4090 × 1；基础镜像选 PyTorch ≥ 2.5、CUDA ≥ 12.4、Python 3.10–3.12；数据盘扩到 100 GB。
 
-租到后**直接带卡开机，准备和训练一口气跑完，中间不要关机**：关机会释放 GPU，再开机时这台主机可能已经没有空闲卡。准备阶段十几分钟，带卡多花的钱很少。`setup_server.sh` 也能在无卡模式下跑，但按这个理由不推荐。
+租到后直接带卡开机，准备和训练一次跑完，中间不要关机：关机会释放 GPU，再开机时这台主机可能已经没有空闲卡。准备阶段十几分钟，带卡多花的钱很少。`setup_server.sh` 也能在无卡模式下跑，但按这个理由不推荐。
 
-**1. 准备**
+### 1. 准备
 
 ```bash
 tmux new -s p1                                # 网页终端断开也不会中断
@@ -32,9 +32,9 @@ cd llm-posttrain-gsm8k && bash setup_server.sh
 
 `setup_server.sh` 做四件事：装依赖（torch 用镜像自带的）→ 下载 GSM8K 并从训练集切出 500 题验证集 → 下载模型（HuggingFace，失败就换 hf-mirror，再失败换 ModelScope）→ 跑 `smoke_test.py`。最后打印 `ALL PASSED` 才算准备好。
 
-仓库是私有的话，`git clone` 会要求登录：用户名填 GitHub 用户名，密码填一个对这个仓库有只读权限的 fine-grained token；或者在 GitHub 网页上 Download ZIP，再从 JupyterLab 上传。
+### 2. 第 ① 步：GRPO 训练与评测
 
-**2. 训练**（在同一个 tmux 窗口里接着跑）
+在同一个 tmux 窗口里接着跑：
 
 ```bash
 bash run_step1.sh
@@ -43,17 +43,19 @@ bash run_step1.sh
 
 `run_step1.sh`：检查环境 → 训练前基线（测试集 1319 题，贪心）→ GRPO 训练（默认 150 步，每 25 步测一次验证集）→ 训练后评测（同一测试集、同一脚本）→ 前后对比 → 把结果打包成 `runs/step1_<时间>.tgz`（不含权重）。额外参数会传给 `train_grpo.py`，比如 `bash run_step1.sh --steps 100`。
 
-**耗时（实测，RTX 4090 48GB）**：每步约 52 秒，150 步约 2.2 小时；训练前、训练后两次测试集评测各约 1.5 分钟。实测用的参数是 `--gen-batch-size 512 --micro-batch-size 8 --val-batch-size 256`（只影响速度，不影响结果口径）。
+耗时（实测，RTX 4090 48GB）：每步约 52 秒，150 步约 2.2 小时；训练前、训练后两次测试集评测各约 1.5 分钟。实测用的参数是 `--gen-batch-size 512 --micro-batch-size 8 --val-batch-size 256`（只影响速度，不影响结果口径）。
 
-**第 ②–④ 步**（在第 ① 步跑完后）：
+### 3. 第 ②–④ 步
+
+在第 ① 步跑完后：
 
 ```bash
 bash run_step3.sh /root/autodl-tmp/p1/runs/step1_<时间>   # ③ SFT、DPO 与四模型对比表
 bash run_step4.sh                                         # ④ 带工具的多轮 GRPO（三条件对照）
-bash setup_verl.sh && bash run_step2.sh                   # ② verl 复跑（环境适配见 RESULTS.md 第 5 节）
+bash setup_verl.sh && bash run_step2.sh                   # ② verl 复跑（这次没有装通，见下文「验证情况」）
 ```
 
-**显存不够**时依次试：`--micro-batch-size 2`、`--gen-batch-size 128`。
+显存不够时依次试：`--micro-batch-size 2`、`--gen-batch-size 128`。
 
 ---
 
@@ -82,9 +84,9 @@ bash setup_verl.sh && bash run_step2.sh                   # ② verl 复跑（�
 - **判分与 verl 严格模式一致**：只看回答最后 300 个字符，取最后一个 `#### 数字`，去逗号后按字符串比较。另有宽松判分（取最后一个数、按数值比较），只在评测时用来拆分“格式错”和“算错”。
 - **采样参数整份替换**：Qwen2.5-Instruct 自带的 `generation_config.json` 是 temperature 0.7、top_p 0.8、top_k 20、repetition_penalty 1.1。RL 必须从策略本身的分布采样，所以采样时关掉 top-k、top-p 和重复惩罚，贪心评测也关掉重复惩罚。`smoke_test.py` 会检查 generate 的原始 logits 和处理后的 scores 完全一致。
 - **两份权重**：训练端是 fp32 主权重，前向在 bf16 autocast 下算；采样用一份 bf16 副本（相当于 verl 里的推理引擎），每步更新后同步一次（`update_weights`）。
-- **old logprob 在训练端重算**，参考模型是初始权重的冻结副本、和训练端同精度，所以第一个 micro-batch 的 ratio 理论上等于 1、第 1 步的 KL 等于 0。日志里的 `diag/*` 记录实际偏离多少，以及采样副本和训练端算出的 logprob 差多少（训推不一致的小测量）。
-- **位置编码从 attention_mask 推出来**（左填充时和 generate 一致）；**只把回答位置送进 lm_head**（词表 15 万，prompt 部分的 logits 用不上）。
-- **loss 聚合**默认 token-mean，分母取整个 mini-batch 的 token 数，梯度累积多个 micro-batch 后和一次算完相同；可切换成 GRPO 论文原式的 seq-mean-token-mean。
+- **old logprob 在训练端重算**：参考模型是初始权重的冻结副本、和训练端同精度，所以第一个 micro-batch 的 ratio 理论上等于 1、第 1 步的 KL 等于 0。日志里的 `diag/*` 记录实际偏离多少，以及采样副本和训练端算出的 logprob 差多少（训推不一致的小测量）。
+- **位置编码与 lm_head**：位置编码从 attention_mask 推出来（左填充时和 generate 一致）；只把回答位置送进 lm_head（词表 15 万，prompt 部分的 logits 用不上）。
+- **loss 聚合**：默认 token-mean，分母取整个 mini-batch 的 token 数，梯度累积多个 micro-batch 后和一次算完相同；可切换成 GRPO 论文原式的 seq-mean-token-mean。
 - **测试集只用两次**：训练中的监控只看从训练集切出的 500 题验证集，测试集只在训练前、训练后各测一次。
 
 ---
@@ -132,3 +134,9 @@ verl 的默认值按 2026-10-21 的 main 分支核对；实际装的版本不同
 - `smoke_test.py` 在服务器上 5 部分全部通过。第一次运行时抓到并修复了 3 个问题：transformers 4.57 缩层时要同步截短 `layer_types`；工具代码抛异常要回灌 traceback 并计入失败率；模型没写代码块时要结束轨迹。
 - ①③④ 三步都在 RTX 4090 48GB 上实际跑完，数字全部来自运行输出（见 `RESULTS.md`）。
 - 第 ② 步的 verl 完整复跑没有完成：verl 0.4.1 只认 vLLM 0.6.3 或 0.7.0+。0.6.3 锁 torch 2.4，和服务器的 torch 2.5.1 冲突；0.7.2 本身兼容 torch 2.5.1，但不加约束时 pip 会拉到 transformers 5.x（verl 0.4.1 不支持），镜像又极慢，这次没有继续。下次可以试 vLLM 0.7.x + `transformers<5`。
+
+---
+
+## 许可
+
+代码以 MIT 许可证发布，见 [`LICENSE`](LICENSE)。仓库不包含数据和模型权重，运行时从网上下载：GSM8K（MIT 许可），Qwen2.5-0.5B-Instruct（Apache-2.0 许可）。
