@@ -2,12 +2,14 @@
 
 小模型后训练实验：单张 RTX 4090，Qwen2.5-0.5B-Instruct + GSM8K，按顺序做四步。每一步都在**同一个留出测试集**上用**同一个评测脚本**量效果，结果可以直接放进一张表比较。
 
-| 步骤 | 内容 | 状态 |
+| 步骤 | 内容 | 结果（测试集 1319 题，严格口径） |
 |---|---|---|
-| ① | 自写 GRPO，训练前后在测试集上评测 | 代码完成，**还没在 GPU 上跑过** |
-| ② | 用 verl 跑同一配置：逐项对齐，并把每步拆成 rollout / 参考模型 / 更新等段计时 | 未开始 |
-| ③ | 同一底座做 SFT、DPO，和 GRPO 对比 | 未开始 |
-| ④ | 给模型 Python 解释器工具，做多轮 GRPO | 未开始 |
+| ① | 自写 GRPO，训练前后在测试集上评测 | 0.08% → **56.2%** |
+| ② | 与 verl 对齐 + 每步耗时拆分 | 与 verl 公布的同模型基线（PPO 56.7、GRPO-LoRA 54.3）一致；rollout 占每步 63.6%。用 verl 完整复跑因 vLLM / transformers 版本冲突没有完成，脚本留在仓库 |
+| ③ | 同一底座做 SFT、DPO，和 GRPO 对比 | SFT 37.5%；DPO 没学会格式（严格 0.08%，宽松提升不显著） |
+| ④ | 给模型 Python 解释器工具，做多轮 GRPO | 1.4% → **46.6%**（不及纯推理 GRPO） |
+
+完整结果、分析和局限见 [`RESULTS.md`](RESULTS.md)。
 
 ---
 
@@ -41,7 +43,15 @@ bash run_step1.sh
 
 `run_step1.sh`：检查环境 → 训练前基线（测试集 1319 题，贪心）→ GRPO 训练（默认 150 步，每 25 步测一次验证集）→ 训练后评测（同一测试集、同一脚本）→ 前后对比 → 把结果打包成 `runs/step1_<时间>.tgz`（不含权重）。额外参数会传给 `train_grpo.py`，比如 `bash run_step1.sh --steps 100`。
 
-**耗时（推算，没实测）**：每步 1–1.5 分钟，150 步约 2.5–4 小时，加上前后两次测试集评测各几分钟。前几步的日志里有 `eta`，以它为准。
+**耗时（实测，RTX 4090 48GB）**：每步约 52 秒，150 步约 2.2 小时；训练前、训练后两次测试集评测各约 1.5 分钟。实测用的参数是 `--gen-batch-size 512 --micro-batch-size 8 --val-batch-size 256`（只影响速度，不影响结果口径）。
+
+**第 ②–④ 步**（在第 ① 步跑完后）：
+
+```bash
+bash run_step3.sh /root/autodl-tmp/p1/runs/step1_<时间>   # ③ SFT、DPO 与四模型对比表
+bash run_step4.sh                                         # ④ 带工具的多轮 GRPO（三条件对照）
+bash setup_verl.sh && bash run_step2.sh                   # ② verl 复跑（环境适配见 RESULTS.md 第 5 节）
+```
 
 **显存不够**时依次试：`--micro-batch-size 2`、`--gen-batch-size 128`。
 
@@ -58,8 +68,12 @@ bash run_step1.sh
 | `train_grpo.py` | GRPO 主循环，分段计时，写 `metrics.jsonl` |
 | `eval_gsm8k.py` | 贪心评测：严格 / 宽松准确率、逐题结果；第 ②、③ 步的模型也用它测 |
 | `compare_evals.py` | 两次评测的配对比较：McNemar 精确检验、“格式错 / 算错”拆分 |
-| `smoke_test.py` | 开训前在 CPU 上跑的测试（纯函数、采样配置、logprob 一致性、端到端 2 步） |
-| `setup_server.sh` / `run_step1.sh` | 服务器上的准备和正式运行 |
+| `train_sft.py` / `make_dpo_pairs.py` / `train_dpo.py` | 第 ③ 步：SFT、用底座采样造偏好对、DPO |
+| `summarize_evals.py` | 多个模型的评测放一张表，并和基线做 McNemar 检验 |
+| `tool_rollout.py` / `train_grpo_tool.py` / `eval_tool.py` | 第 ④ 步：工具沙箱与多轮轨迹（工具返回不计 loss）、带工具 GRPO、带工具评测 |
+| `smoke_test.py` | 开训前在 CPU 上跑的测试（5 部分：纯函数、采样配置与 logprob 一致性、端到端、第 ③ 步、第 ④ 步） |
+| `setup_server.sh` / `run_step1.sh` – `run_step4.sh` / `setup_verl.sh` | 服务器上的准备和各步运行脚本 |
+| `RESULTS.md` | 实验结果、耗时分解、局限 |
 
 ---
 
@@ -115,6 +129,6 @@ verl 的默认值按 2026-10-21 的 main 分支核对；实际装的版本不同
 
 ## 验证情况
 
-- 本地只做了语法检查（`py_compile`、`bash -n`）。按计划不在本地装 torch、不在本地跑。
-- `smoke_test.py` 由 `setup_server.sh` 在开训前自动跑一遍（只用 CPU），通过后再开始训练。**它还没运行过**，第一次跑如果报错，按报错改。
-- GPU 上的完整训练还没跑过，上面的耗时都是推算。
+- `smoke_test.py` 在服务器上 5 部分全部通过。第一次运行时抓到并修复了 3 个问题：transformers 4.57 缩层时要同步截短 `layer_types`；工具代码抛异常要回灌 traceback 并计入失败率；模型没写代码块时要结束轨迹。
+- ①③④ 三步都在 RTX 4090 48GB 上实际跑完，数字全部来自运行输出（见 `RESULTS.md`）。
+- 第 ② 步的 verl 完整复跑没有完成：verl 0.4.1 只认 vLLM 0.6.3 或 0.7.0+。0.6.3 锁 torch 2.4，和服务器的 torch 2.5.1 冲突；0.7.2 本身兼容 torch 2.5.1，但不加约束时 pip 会拉到 transformers 5.x（verl 0.4.1 不支持），镜像又极慢，这次没有继续。下次可以试 vLLM 0.7.x + `transformers<5`。
